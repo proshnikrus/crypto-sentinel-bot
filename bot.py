@@ -1,26 +1,24 @@
 import os
 import logging
-import random
+import asyncio
 from datetime import datetime
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
+import google.generativeai as genai
 
 # Настройка логирования
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Список монет
 SUPPORTED_COINS = ["BTC", "ETH", "SOL", "ADA", "DOT", "XRP", "DOGE", "MATIC", "BNB", "LTC"]
 
-# ===== КОМАНДЫ =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     await update.message.reply_text(
         f"🚀 Привет, {user.first_name}!\n\n"
         "Я - Crypto Sentinel AI бот.\n"
+        "Анализирую настроения крипторынка с помощью нейросети Gemini.\n\n"
         "Используй /help чтобы увидеть команды."
     )
 
@@ -30,7 +28,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/start - Начать\n"
         "/help - Помощь\n"
         "/coins - Список монет\n"
-        "/sentiment BTC - Анализ монеты"
+        "/sentiment BTC - Анализ монеты (реальная нейросеть)\n"
+        "/daily - Ежедневный отчет (скоро)\n"
+        "/subscribe - Подписка (скоро)"
     )
 
 async def coins_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -49,49 +49,58 @@ async def sentiment(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"Монета {coin} не поддерживается. Список: /coins")
             return
         
-        # Отправляем сообщение о начале анализа
-        await update.message.reply_text(f"🔍 Анализирую {coin}...")
+        processing_msg = await update.message.reply_text(f"🧠 Анализирую {coin} с помощью нейросети Gemini...\n⏳ Это займёт 10-15 секунд.")
         
-        # Генерируем случайный отчет (демо)
-        score = random.randint(30, 85)
-        trend = "бычий" if score > 60 else "медвежий" if score < 40 else "нейтральный"
+        # Получаем API ключ из переменных окружения
+        api_key = os.getenv('GEMINI_API_KEY')
         
-        report = f"""
-📊 Отчет по {coin}
-📅 {datetime.now().strftime('%d.%m.%Y %H:%M')}
+        if not api_key:
+            await processing_msg.edit_text("⚠️ API ключ Gemini не настроен. Добавьте переменную GEMINI_API_KEY в Render.")
+            return
+        
+        # Настраиваем Gemini
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel('gemini-2.0-flash-exp')
+        
+        prompt = f"""Ты — криптоаналитик. Напиши краткий анализ настроений по криптовалюте {coin} на основе рыночных трендов и новостей. Используй эмодзи. Формат ответа:
 
-Настроение: {trend} ({score}/100)
+📊 Настроение: [бычье/медвежье/нейтральное]
+📈 Уверенность: [0-100]%
+🔥 Ключевые факторы: (2-3 пункта)
+💡 Краткий итог: (1 предложение)
 
-Ключевые темы:
-• Обсуждение новостей {coin}
-• Рыночные тренды
-• Активность сообщества
-
-💡 Это демо-версия. Реальный AI анализ скоро!
-"""
-        await update.message.reply_text(report)
+Ответ должен быть на русском, дружелюбным и информативным. Не более 500 символов."""
+        
+        try:
+            response = await asyncio.to_thread(
+                model.generate_content,
+                prompt
+            )
+            
+            ai_report = response.text
+            
+            await processing_msg.delete()
+            await update.message.reply_text(f"🤖 *AI анализ {coin} (Gemini):*\n\n{ai_report}", parse_mode='Markdown')
+            
+        except Exception as e:
+            logger.error(f"Ошибка Gemini: {e}")
+            await processing_msg.edit_text(f"⚠️ Ошибка нейросети. Попробуйте позже.")
         
     except Exception as e:
         logger.error(f"Ошибка: {e}")
         await update.message.reply_text("⚠️ Ошибка. Попробуйте позже.")
 
 async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "💰 Подписка $10/месяц\n"
-        "Скоро будет доступна!"
-    )
+    await update.message.reply_text("💰 Подписка $10/месяц\nСкоро будет доступна!")
 
 async def daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "📅 Ежедневный отчет будет доступен после подписки."
-    )
+    await update.message.reply_text("📅 Ежедневный отчет будет доступен после подписки.")
 
-# ===== ЗАПУСК =====
 def main():
     TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
     
     if not TOKEN:
-        logger.error("Токен не найден!")
+        logger.error("Токен Telegram не найден!")
         return
     
     app = Application.builder().token(TOKEN).build()
@@ -103,8 +112,8 @@ def main():
     app.add_handler(CommandHandler("subscribe", subscribe))
     app.add_handler(CommandHandler("daily", daily))
     
-    logger.info("Бот запущен!")
-    print("Crypto Sentinel AI Bot - Running")
+    logger.info("Бот запущен с Gemini AI!")
+    print("Crypto Sentinel AI Bot - Running with Gemini")
     
     app.run_polling()
 
