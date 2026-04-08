@@ -1,6 +1,5 @@
 import os
 import logging
-import asyncio
 from datetime import datetime
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
@@ -12,6 +11,15 @@ logger = logging.getLogger(__name__)
 
 # Список монет
 SUPPORTED_COINS = ["BTC", "ETH", "SOL", "ADA", "DOT", "XRP", "DOGE", "MATIC", "BNB", "LTC"]
+
+# Инициализация Gemini (глобально, один раз)
+api_key = os.getenv('GEMINI_API_KEY')
+if api_key:
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel('gemini-2.0-flash-exp')
+else:
+    model = None
+    logger.warning("GEMINI_API_KEY не найден")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -49,18 +57,11 @@ async def sentiment(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"Монета {coin} не поддерживается. Список: /coins")
             return
         
-        processing_msg = await update.message.reply_text(f"🧠 Анализирую {coin} с помощью нейросети Gemini...\n⏳ Это займёт 10-15 секунд.")
-        
-        # Получаем API ключ из переменных окружения
-        api_key = os.getenv('GEMINI_API_KEY')
-        
-        if not api_key:
-            await processing_msg.edit_text("⚠️ API ключ Gemini не настроен. Добавьте переменную GEMINI_API_KEY в Render.")
+        if not model:
+            await update.message.reply_text("⚠️ Нейросеть не настроена. Добавьте GEMINI_API_KEY в Render.")
             return
         
-        # Настраиваем Gemini
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-2.0-flash-exp')
+        processing_msg = await update.message.reply_text(f"🧠 Анализирую {coin} с помощью нейросети Gemini...\n⏳ Это займёт 10-15 секунд.")
         
         prompt = f"""Ты — криптоаналитик. Напиши краткий анализ настроений по криптовалюте {coin} на основе рыночных трендов и новостей. Используй эмодзи. Формат ответа:
 
@@ -72,11 +73,7 @@ async def sentiment(update: Update, context: ContextTypes.DEFAULT_TYPE):
 Ответ должен быть на русском, дружелюбным и информативным. Не более 500 символов."""
         
         try:
-            response = await asyncio.to_thread(
-                model.generate_content,
-                prompt
-            )
-            
+            response = model.generate_content(prompt)
             ai_report = response.text
             
             await processing_msg.delete()
@@ -84,7 +81,7 @@ async def sentiment(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
         except Exception as e:
             logger.error(f"Ошибка Gemini: {e}")
-            await processing_msg.edit_text(f"⚠️ Ошибка нейросети. Попробуйте позже.")
+            await processing_msg.edit_text(f"⚠️ Ошибка нейросети: {str(e)[:100]}")
         
     except Exception as e:
         logger.error(f"Ошибка: {e}")
