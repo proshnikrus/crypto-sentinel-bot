@@ -3,30 +3,29 @@ import logging
 from datetime import datetime
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
-import google.generativeai as genai
+from openai import OpenAI
 
 # Настройка логирования
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Список монет
+# Список монет (исправлено: множество в списке)
 SUPPORTED_COINS = ["BTC", "ETH", "SOL", "ADA", "DOT", "XRP", "DOGE", "MATIC", "BNB", "LTC"]
 
-# Инициализация Gemini (глобально, один раз)
-api_key = os.getenv('GEMINI_API_KEY')
+# Инициализация DeepSeek
+api_key = os.getenv('DEEPSEEK_API_KEY')
 if api_key:
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com/v1")
 else:
-    model = None
-    logger.warning("GEMINI_API_KEY не найден")
+    client = None
+    logger.warning("DEEPSEEK_API_KEY не найден")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     await update.message.reply_text(
         f"🚀 Привет, {user.first_name}!\n\n"
         "Я - Crypto Sentinel AI бот.\n"
-        "Анализирую настроения крипторынка с помощью нейросети Gemini.\n\n"
+        "Анализирую настроения крипторынка с помощью нейросети DeepSeek.\n\n"
         "Используй /help чтобы увидеть команды."
     )
 
@@ -36,7 +35,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/start - Начать\n"
         "/help - Помощь\n"
         "/coins - Список монет\n"
-        "/sentiment BTC - Анализ монеты (реальная нейросеть)\n"
+        "/sentiment BTC - Анализ монеты (нейросеть DeepSeek)\n"
         "/daily - Ежедневный отчет (скоро)\n"
         "/subscribe - Подписка (скоро)"
     )
@@ -54,14 +53,14 @@ async def sentiment(update: Update, context: ContextTypes.DEFAULT_TYPE):
         coin = context.args[0].upper()
         
         if coin not in SUPPORTED_COINS:
-            await update.message.reply_text(f"Монета {coin} не поддерживается. Список: /coins")
+            await update.message.reply_text(f"❌ Монета {coin} не поддерживается. Список: /coins")
             return
         
-        if not model:
-            await update.message.reply_text("⚠️ Нейросеть не настроена. Добавьте GEMINI_API_KEY в Render.")
+        if not client:
+            await update.message.reply_text("⚠️ Нейросеть не настроена. Добавьте DEEPSEEK_API_KEY в Render.")
             return
         
-        processing_msg = await update.message.reply_text(f"🧠 Анализирую {coin} с помощью нейросети Gemini...\n⏳ Это займёт 10-15 секунд.")
+        processing_msg = await update.message.reply_text(f"🧠 Анализирую {coin} с помощью DeepSeek...\n⏳ Это займёт 10-15 секунд.")
         
         prompt = f"""Ты — криптоаналитик. Напиши краткий анализ настроений по криптовалюте {coin} на основе рыночных трендов и новостей. Используй эмодзи. Формат ответа:
 
@@ -73,15 +72,24 @@ async def sentiment(update: Update, context: ContextTypes.DEFAULT_TYPE):
 Ответ должен быть на русском, дружелюбным и информативным. Не более 500 символов."""
         
         try:
-            response = model.generate_content(prompt)
-            ai_report = response.text
+            response = client.chat.completions.create(
+                model="deepseek-chat",
+                messages=[
+                    {"role": "system", "content": "Ты полезный ассистент-криптоаналитик."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=300,
+                temperature=0.7
+            )
+            
+            ai_report = response.choices[0].message.content
             
             await processing_msg.delete()
-            await update.message.reply_text(f"🤖 *AI анализ {coin} (Gemini):*\n\n{ai_report}", parse_mode='Markdown')
+            await update.message.reply_text(f"🤖 *AI анализ {coin} (DeepSeek):*\n\n{ai_report}", parse_mode='Markdown')
             
         except Exception as e:
-            logger.error(f"Ошибка Gemini: {e}")
-            await processing_msg.edit_text(f"⚠️ Ошибка нейросети: {str(e)[:100]}")
+            logger.error(f"Ошибка DeepSeek: {e}")
+            await processing_msg.edit_text(f"⚠️ Ошибка нейросети. Попробуйте позже.")
         
     except Exception as e:
         logger.error(f"Ошибка: {e}")
@@ -109,8 +117,8 @@ def main():
     app.add_handler(CommandHandler("subscribe", subscribe))
     app.add_handler(CommandHandler("daily", daily))
     
-    logger.info("Бот запущен с Gemini AI!")
-    print("Crypto Sentinel AI Bot - Running with Gemini")
+    logger.info("Бот запущен с DeepSeek AI!")
+    print("Crypto Sentinel AI Bot - Running with DeepSeek")
     
     app.run_polling()
 
