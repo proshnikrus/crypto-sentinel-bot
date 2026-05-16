@@ -1,7 +1,8 @@
 import os
 import logging
 import asyncio
-import sqlite3
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
@@ -14,51 +15,92 @@ logger = logging.getLogger(__name__)
 
 SUPPORTED_COINS = ["BTC", "ETH", "SOL", "ADA", "DOT", "XRP", "DOGE", "MATIC", "BNB", "LTC"]
 
-# ---------- БАЗА ДАННЫХ ----------
+# ---------- ПОДКЛЮЧЕНИЕ К POSTGRESQL ----------
+def get_db_connection():
+    DATABASE_URL = os.getenv('DATABASE_URL')
+    if not DATABASE_URL:
+        raise Exception("DATABASE_URL не задан в переменных окружения")
+    return psycopg2.connect(DATABASE_URL)
+
 def init_db():
-    conn = sqlite3.connect('subscriptions.db')
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS users (
-        user_id INTEGER PRIMARY KEY,
-        subscribed_until TEXT,
-        trial_used BOOLEAN DEFAULT 0
-    )''')
-    conn.commit()
-    conn.close()
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                user_id BIGINT PRIMARY KEY,
+                subscribed_until TIMESTAMP,
+                trial_used BOOLEAN DEFAULT FALSE
+            )
+        ''')
+        conn.commit()
+        conn.close()
+        logger.info("База данных PostgreSQL готова")
+    except Exception as e:
+        logger.error(f"Ошибка инициализации БД: {e}")
 
 def is_trial_used(user_id):
-    conn = sqlite3.connect('subscriptions.db')
-    c = conn.cursor()
-    c.execute("SELECT trial_used FROM users WHERE user_id=?", (user_id,))
-    result = c.fetchone()
-    conn.close()
-    return result and result[0] == 1
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("SELECT trial_used FROM users WHERE user_id = %s", (user_id,))
+        result = c.fetchone()
+        conn.close()
+        return result and result[0] == True
+    except Exception as e:
+        logger.error(f"Ошибка проверки trial: {e}")
+        return False
 
 def activate_trial(user_id):
-    conn = sqlite3.connect('subscriptions.db')
-    c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO users (user_id, trial_used, subscribed_until) VALUES (?, 1, ?)",
-              (user_id, (datetime.now() + timedelta(days=3)).isoformat()))
-    conn.commit()
-    conn.close()
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        until_date = datetime.now() + timedelta(days=3)
+        c.execute("""
+            INSERT INTO users (user_id, subscribed_until, trial_used)
+            VALUES (%s, %s, TRUE)
+            ON CONFLICT (user_id) DO UPDATE
+            SET subscribed_until = EXCLUDED.subscribed_until,
+                trial_used = TRUE
+        """, (user_id, until_date))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка активации trial: {e}")
+        return False
 
 def is_subscribed(user_id):
-    conn = sqlite3.connect('subscriptions.db')
-    c = conn.cursor()
-    c.execute("SELECT subscribed_until FROM users WHERE user_id=?", (user_id,))
-    result = c.fetchone()
-    conn.close()
-    if result and result[0]:
-        return datetime.now() < datetime.fromisoformat(result[0])
-    return False
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("SELECT subscribed_until FROM users WHERE user_id = %s", (user_id,))
+        result = c.fetchone()
+        conn.close()
+        if result and result[0]:
+            return datetime.now() < result[0]
+        return False
+    except Exception as e:
+        logger.error(f"Ошибка проверки подписки: {e}")
+        return False
 
 def activate_subscription(user_id):
-    conn = sqlite3.connect('subscriptions.db')
-    c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO users (user_id, subscribed_until) VALUES (?, ?)",
-              (user_id, (datetime.now() + timedelta(days=30)).isoformat()))
-    conn.commit()
-    conn.close()
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        until_date = datetime.now() + timedelta(days=30)
+        c.execute("""
+            INSERT INTO users (user_id, subscribed_until, trial_used)
+            VALUES (%s, %s, FALSE)
+            ON CONFLICT (user_id) DO UPDATE
+            SET subscribed_until = EXCLUDED.subscribed_until
+        """, (user_id, until_date))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка активации подписки: {e}")
+        return False
 
 # ---------- DEEPSEEK ----------
 DEEPSEEK_API_KEY = os.getenv('DEEPSEEK_API_KEY')
@@ -68,8 +110,12 @@ deepseek_client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url="https://api.deepsee
 CRYPTOBOT_TOKEN = os.getenv('CRYPTOBOT_TOKEN')
 crypto = None
 if CRYPTOBOT_TOKEN:
-    from async_crypto_pay_api import CryptoPayApi
-    crypto = CryptoPayApi(CRYPTOBOT_TOKEN)
+    try:
+        from async_crypto_pay_api import CryptoPayApi
+        crypto = CryptoPayApi(CRYPTOBOT_TOKEN)
+    except ImportError:
+        logger.warning("async-crypto-pay-api не установлен")
+        crypto = None
 
 # ---------- НОВОСТИ ----------
 async def get_news(coin: str) -> str:
@@ -133,7 +179,7 @@ async def get_sell_suggestion(coin: str) -> str:
     except:
         return "⚠️ Рекомендация недоступна.\n\n⚠️ Не является инвестиционной рекомендацией."
 
-# ---------- КОМАНДЫ ----------
+# ---------- КОМАНДЫ И КНОПКИ ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     await update.message.reply_text(
@@ -152,14 +198,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
     )
 
-# ---------- ОБРАБОТЧИК КНОПОК ----------
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
     user_id = update.effective_user.id
 
-    # Главное меню
     if data == "main_menu":
         await query.edit_message_text(
             "🏠 *Главное меню*",
@@ -175,28 +219,21 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Пробный период
     if data == "trial_period":
         if is_trial_used(user_id):
             await query.edit_message_text("❌ Вы уже использовали пробный период.")
         else:
             activate_trial(user_id)
-            await query.edit_message_text(
-                "🎁 Пробный период активирован на 3 дня!\n"
-                "Теперь вам доступны анализ монет и ежедневные отчёты.\n\n"
-                "Вернитесь в главное меню: /start"
-            )
+            await query.edit_message_text("🎁 Пробный период активирован на 3 дня!\nВернитесь в главное меню: /start")
         return
 
-    # Подписка
     if data == "subscribe_now":
         if is_subscribed(user_id):
             await query.edit_message_text("✅ У вас уже активна подписка.")
             return
         if not crypto:
-            await query.edit_message_text("⚠️ Система оплаты временно недоступна. Попробуйте позже.")
+            await query.edit_message_text("⚠️ Система оплаты временно недоступна.")
             return
-        
         invoice = await crypto.create_invoice(
             currency_type="fiat",
             fiat="USD",
@@ -211,27 +248,24 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Проверка оплаты
     if data == "check_payment_now":
         invoice_id = context.user_data.get('pending_invoice_id')
         if not invoice_id:
             await query.edit_message_text("Нет активного счёта. Используйте '💰 Подписка $10'")
             return
-        
+        if not crypto:
+            await query.edit_message_text("⚠️ Система оплаты недоступна")
+            return
         invoices = await crypto.get_invoices(invoice_ids=[invoice_id])
         invoice = invoices[0]
         if invoice.status == "paid":
             activate_subscription(user_id)
             until_date = (datetime.now() + timedelta(days=30)).strftime('%d.%m.%Y')
-            await query.edit_message_text(
-                f"✅ Оплата получена! Подписка активна до {until_date}.\n"
-                f"Теперь вам доступны все функции бота."
-            )
+            await query.edit_message_text(f"✅ Оплата получена! Подписка активна до {until_date}.")
         else:
             await query.edit_message_text(f"❌ Оплата не найдена. Статус: {invoice.status}")
         return
 
-    # Ежедневный отчёт
     if data == "daily_report":
         if not is_subscribed(user_id) and not is_trial_used(user_id):
             await query.edit_message_text("❌ Ежедневные отчёты доступны только по подписке или пробному периоду.")
@@ -239,20 +273,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("📅 Ежедневный отчёт скоро будет доступен. А пока используйте анализ монет.")
         return
 
-    # Отзывы
     if data == "feedback_menu":
-        await query.edit_message_text(
-            "✍️ Напишите свой отзыв или предложение в одном сообщении.\n"
-            "За полезный отзыв мы дадим промокод на скидку 20% на следующий месяц!"
-        )
+        await query.edit_message_text("✍️ Напишите свой отзыв или предложение в одном сообщении.\nЗа полезный отзыв мы дадим промокод на скидку 20% на следующий месяц!")
         return
 
-    # Выбор монеты
     if data == "start_analyze":
         if not is_subscribed(user_id) and not is_trial_used(user_id):
             await query.edit_message_text("❌ Анализ доступен только по подписке или пробному периоду.")
             return
-        
         keyboard = []
         for i in range(0, len(SUPPORTED_COINS), 3):
             row = [InlineKeyboardButton(coin, callback_data=f"analyze_{coin}") for coin in SUPPORTED_COINS[i:i+3]]
@@ -261,7 +289,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("🔍 Выберите криптовалюту:", reply_markup=InlineKeyboardMarkup(keyboard))
         return
 
-    # Анализ монеты
     if data.startswith("analyze_"):
         coin = data.split("_")[1]
         await query.edit_message_text(f"🧠 Анализирую {coin}...\n📰 Получаю свежие новости...")
@@ -270,7 +297,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         analysis = await get_analysis(coin, news)
         context.user_data['last_analysis'] = analysis
         context.user_data['last_coin'] = coin
-        
         keyboard = [
             [InlineKeyboardButton("📅 Примерная продажа", callback_data="sell_advice")],
             [InlineKeyboardButton("🔙 Главное меню", callback_data="main_menu")]
@@ -282,7 +308,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Примерная продажа
     if data == "sell_advice":
         coin = context.user_data.get('last_coin', 'BTC')
         await query.edit_message_text(f"📊 Генерирую рекомендацию по продаже {coin}...")
@@ -298,7 +323,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Назад к анализу
     if data == "back_to_analysis":
         coin = context.user_data.get('last_coin', 'BTC')
         analysis = context.user_data.get('last_analysis', 'Анализ недоступен')
@@ -313,70 +337,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-# ---------- ЗАГЛУШКИ КОМАНД (чтобы не ломались) ----------
+# ---------- ЗАГЛУШКИ КОМАНД ----------
 async def coins_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"📊 Поддерживаемые монеты:\n{', '.join(SUPPORTED_COINS)}")
-
-async def trial(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if is_trial_used(user_id):
-        await update.message.reply_text("❌ Вы уже использовали пробный период.")
-    else:
-        activate_trial(user_id)
-        await update.message.reply_text("🎁 Пробный период активирован на 3 дня!")
-
-async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if is_subscribed(user_id):
-        await update.message.reply_text("✅ У вас уже активна подписка.")
-        return
-    if not crypto:
-        await update.message.reply_text("⚠️ Система оплаты временно недоступна.")
-        return
-    
-    invoice = await crypto.create_invoice(
-        currency_type="fiat",
-        fiat="USD",
-        amount=10,
-        expires_in=3600
-    )
-    context.user_data['pending_invoice_id'] = invoice.invoice_id
-    await update.message.reply_text(
-        f"💰 Подписка на месяц — $10\n\n"
-        f"Оплатите по ссылке:\n{invoice.bot_invoice_url}\n\n"
-        f"После оплаты нажмите /check_payment"
-    )
-
-async def check_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    invoice_id = context.user_data.get('pending_invoice_id')
-    if not invoice_id:
-        await update.message.reply_text("Нет активного счёта. Используйте /subscribe")
-        return
-    
-    invoices = await crypto.get_invoices(invoice_ids=[invoice_id])
-    invoice = invoices[0]
-    if invoice.status == "paid":
-        activate_subscription(user_id)
-        until_date = (datetime.now() + timedelta(days=30)).strftime('%d.%m.%Y')
-        await update.message.reply_text(
-            f"✅ Оплата получена! Подписка активна до {until_date}."
-        )
-    else:
-        await update.message.reply_text(f"❌ Оплата не найдена. Статус: {invoice.status}")
-
-async def daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if not is_subscribed(user_id) and not is_trial_used(user_id):
-        await update.message.reply_text("❌ Ежедневные отчёты доступны только по подписке или пробному периоду.")
-    else:
-        await update.message.reply_text("📅 Ежедневный отчёт скоро будет доступен.")
-
-async def feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "✍️ Напишите свой отзыв в одном сообщении.\n"
-        "За полезный отзыв мы дадим промокод на скидку 20%!"
-    )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -402,21 +365,13 @@ def main():
     
     app = Application.builder().token(TOKEN).build()
     
-    # Команды (оставлены для совместимости, но всё управление через кнопки)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("coins", coins_command))
-    app.add_handler(CommandHandler("trial", trial))
-    app.add_handler(CommandHandler("subscribe", subscribe))
-    app.add_handler(CommandHandler("check_payment", check_payment))
-    app.add_handler(CommandHandler("daily", daily))
-    app.add_handler(CommandHandler("feedback", feedback))
-    
-    # Главный обработчик кнопок
     app.add_handler(CallbackQueryHandler(button_callback))
     
-    logger.info("Бот запущен с полным кнопочным меню!")
-    print("Бот работает. Всё управление через кнопки.")
+    logger.info("Бот запущен с PostgreSQL базой данных!")
+    print("Бот работает. База данных: PostgreSQL")
     app.run_polling()
 
 if __name__ == '__main__':
