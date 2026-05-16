@@ -2,3 +2,4 @@ python-telegram-bot==20.7
 openai
 gnews
 async-crypto-pay-api
+psycopg2-binary
