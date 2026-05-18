@@ -2,7 +2,6 @@ import os
 import logging
 import asyncio
 import psycopg2
-from psycopg2.extras import RealDictCursor
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
@@ -23,14 +22,17 @@ def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
 
 def init_db():
-    """Создаёт таблицу и добавляет недостающие колонки"""
+    """Пересоздаёт таблицу с правильной структурой"""
     try:
         conn = get_db_connection()
         c = conn.cursor()
         
-        # Создаём таблицу, если её нет
+        # Удаляем старую таблицу, если есть
+        c.execute("DROP TABLE IF EXISTS users")
+        
+        # Создаём новую с нужными колонками
         c.execute('''
-            CREATE TABLE IF NOT EXISTS users (
+            CREATE TABLE users (
                 user_id BIGINT PRIMARY KEY,
                 subscribed_until TIMESTAMP,
                 trial_used BOOLEAN DEFAULT FALSE,
@@ -38,21 +40,9 @@ def init_db():
             )
         ''')
         
-        # Добавляем колонку trial_used, если её нет
-        try:
-            c.execute("ALTER TABLE users ADD COLUMN trial_used BOOLEAN DEFAULT FALSE")
-        except psycopg2.errors.DuplicateColumn:
-            pass  # колонка уже существует
-        
-        # Добавляем колонку trial_until, если её нет
-        try:
-            c.execute("ALTER TABLE users ADD COLUMN trial_until TIMESTAMP")
-        except psycopg2.errors.DuplicateColumn:
-            pass  # колонка уже существует
-        
         conn.commit()
         conn.close()
-        logger.info("База данных готова (таблица и колонки созданы)")
+        logger.info("База данных пересоздана с правильной структурой")
     except Exception as e:
         logger.error(f"Ошибка инициализации БД: {e}")
 
