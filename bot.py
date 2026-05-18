@@ -19,13 +19,16 @@ SUPPORTED_COINS = ["BTC", "ETH", "SOL", "ADA", "DOT", "XRP", "DOGE", "MATIC", "B
 def get_db_connection():
     DATABASE_URL = os.getenv('DATABASE_URL')
     if not DATABASE_URL:
-        raise Exception("DATABASE_URL не задан в переменных окружения")
+        raise Exception("DATABASE_URL не задан")
     return psycopg2.connect(DATABASE_URL)
 
 def init_db():
+    """Создаёт таблицу и добавляет недостающие колонки"""
     try:
         conn = get_db_connection()
         c = conn.cursor()
+        
+        # Создаём таблицу, если её нет
         c.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
@@ -34,14 +37,27 @@ def init_db():
                 trial_until TIMESTAMP
             )
         ''')
+        
+        # Добавляем колонку trial_used, если её нет
+        try:
+            c.execute("ALTER TABLE users ADD COLUMN trial_used BOOLEAN DEFAULT FALSE")
+        except psycopg2.errors.DuplicateColumn:
+            pass  # колонка уже существует
+        
+        # Добавляем колонку trial_until, если её нет
+        try:
+            c.execute("ALTER TABLE users ADD COLUMN trial_until TIMESTAMP")
+        except psycopg2.errors.DuplicateColumn:
+            pass  # колонка уже существует
+        
         conn.commit()
         conn.close()
-        logger.info("База данных PostgreSQL готова")
+        logger.info("База данных готова (таблица и колонки созданы)")
     except Exception as e:
         logger.error(f"Ошибка инициализации БД: {e}")
 
 def get_user_status(user_id):
-    """Возвращает словарь с информацией о подписке и пробном периоде"""
+    """Возвращает статус подписки и пробного периода"""
     try:
         conn = get_db_connection()
         c = conn.cursor()
@@ -54,7 +70,7 @@ def get_user_status(user_id):
         
         if result:
             subscribed_until = result[0]
-            trial_used = result[1]
+            trial_used = result[1] or False
             trial_until = result[2]
             
             now = datetime.now()
@@ -105,6 +121,8 @@ def activate_trial(user_id):
 
 def is_subscribed(user_id):
     status = get_user_status(user_id)
+    if not status:
+        return False
     return status['has_active_subscription'] or status['has_active_trial']
 
 def activate_subscription(user_id, duration_days=30):
@@ -204,7 +222,7 @@ async def get_sell_suggestion(coin: str) -> str:
     except:
         return "⚠️ Рекомендация недоступна.\n\n⚠️ Не является инвестиционной рекомендацией."
 
-# ---------- ВСПОМОГАТЕЛЬНАЯ КЛАВИАТУРА ----------
+# ---------- КЛАВИАТУРА ----------
 def get_main_menu():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 Анализ монеты", callback_data="start_analyze")],
@@ -221,10 +239,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status = get_user_status(user.id)
     
     status_text = ""
-    if status['has_active_subscription'] and status['subscribed_until']:
+    if status and status['has_active_subscription'] and status['subscribed_until']:
         until = status['subscribed_until'].strftime('%d.%m.%Y %H:%M')
         status_text = f"\n\n✅ *Подписка активна до:* {until}"
-    elif status['has_active_trial'] and status['trial_until']:
+    elif status and status['has_active_trial'] and status['trial_until']:
         until = status['trial_until'].strftime('%d.%m.%Y %H:%M')
         status_text = f"\n\n🎁 *Пробный период активен до:* {until}"
     
@@ -247,10 +265,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "main_menu":
         status = get_user_status(user_id)
         status_text = ""
-        if status['has_active_subscription'] and status['subscribed_until']:
+        if status and status['has_active_subscription'] and status['subscribed_until']:
             until = status['subscribed_until'].strftime('%d.%m.%Y %H:%M')
             status_text = f"\n\n✅ *Подписка активна до:* {until}"
-        elif status['has_active_trial'] and status['trial_until']:
+        elif status and status['has_active_trial'] and status['trial_until']:
             until = status['trial_until'].strftime('%d.%m.%Y %H:%M')
             status_text = f"\n\n🎁 *Пробный период активен до:* {until}"
         
@@ -264,6 +282,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Пробный период
     if data == "trial_period":
         status = get_user_status(user_id)
+        if not status:
+            await query.edit_message_text(
+                "❌ Ошибка. Попробуйте позже.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Главное меню", callback_data="main_menu")]])
+            )
+            return
+        
         if status['trial_used'] and not status['has_active_trial']:
             await query.edit_message_text(
                 "❌ Вы уже использовали пробный период.\n\nВернуться в главное меню:",
@@ -289,19 +314,26 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         activate_trial(user_id)
         new_status = get_user_status(user_id)
-        until = new_status['trial_until'].strftime('%d.%m.%Y %H:%M')
-        await query.edit_message_text(
-            f"🎁 Пробный период активирован на 3 дня!\nДействует до {until}\n\n"
-            "Теперь вам доступен анализ монет.\n"
-            "Вернуться в главное меню:",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Главное меню", callback_data="main_menu")]])
-        )
+        if new_status and new_status['trial_until']:
+            until = new_status['trial_until'].strftime('%d.%m.%Y %H:%M')
+            await query.edit_message_text(
+                f"🎁 Пробный период активирован на 3 дня!\nДействует до {until}\n\n"
+                "Теперь вам доступен анализ монет.\n"
+                "Вернуться в главное меню:",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Главное меню", callback_data="main_menu")]])
+            )
+        else:
+            await query.edit_message_text(
+                "🎁 Пробный период активирован на 3 дня!\n\n"
+                "Вернуться в главное меню:",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Главное меню", callback_data="main_menu")]])
+            )
         return
 
     # Подписка
     if data == "subscribe_now":
         status = get_user_status(user_id)
-        if status['has_active_subscription']:
+        if status and status['has_active_subscription']:
             await query.edit_message_text(
                 f"✅ У вас уже активна платная подписка до {status['subscribed_until'].strftime('%d.%m.%Y %H:%M')}.",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Главное меню", callback_data="main_menu")]])
@@ -351,9 +383,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         invoice = invoices[0]
         if invoice.status == "paid":
             activate_subscription(user_id)
-            until_date = (datetime.now() + timedelta(days=30)).strftime('%d.%m.%Y %H:%M')
             await query.edit_message_text(
-                f"✅ Оплата получена! Подписка активна до {until_date}.\n\n"
+                f"✅ Оплата получена! Подписка активна на 30 дней.\n\n"
                 f"Вернуться в главное меню:",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Главное меню", callback_data="main_menu")]])
             )
@@ -491,8 +522,8 @@ def main():
     app.add_handler(CommandHandler("coins", coins_command))
     app.add_handler(CallbackQueryHandler(button_callback))
     
-    logger.info("Бот запущен с PostgreSQL базой данных и улучшенным меню!")
-    print("Бот работает. Данные подписок сохраняются в PostgreSQL.")
+    logger.info("Бот запущен с PostgreSQL!")
+    print("Бот работает. Данные сохраняются в PostgreSQL.")
     app.run_polling()
 
 if __name__ == '__main__':
