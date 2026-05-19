@@ -121,7 +121,8 @@ crypto = None
 if CRYPTOBOT_TOKEN:
     try:
         from async_crypto_pay_api import CryptoPayApi
-        crypto = CryptoPayApi(CRYPTOBOT_TOKEN)
+        # Явно указываем, что используем тестовую сеть (is_mainnet=False)
+        crypto = CryptoPayApi(api_token=CRYPTOBOT_TOKEN, is_mainnet=False)
         logger.info("CryptoPayApi инициализирован")
     except ImportError:
         logger.error("async-crypto-pay-api не установлен")
