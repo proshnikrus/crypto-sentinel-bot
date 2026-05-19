@@ -122,7 +122,7 @@ if CRYPTOBOT_TOKEN:
     try:
         from async_crypto_pay_api import CryptoPayApi
         crypto = CryptoPayApi(token=CRYPTOBOT_TOKEN)
-        logger.info("CryptoPayApi инициализирован")
+        logger.info("CryptoPayApi инициализирован (токен получен)")
     except ImportError:
         logger.error("async-crypto-pay-api не установлен")
         crypto = None
@@ -130,8 +130,9 @@ if CRYPTOBOT_TOKEN:
         logger.error(f"Ошибка инициализации CryptoPayApi: {e}")
         crypto = None
 else:
-    logger.error("CRYPTOBOT_TOKEN не найден в переменных окружения")
+    logger.error("CRYPTOBOT_TOKEN НЕ НАЙДЕН в переменных окружения")
 
+# ---------- НОВОСТИ ----------
 async def get_news(coin: str) -> str:
     try:
         google_news = GNews(language='ru', period='7d', max_results=3)
@@ -216,6 +217,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     user_id = update.effective_user.id
 
+    # Диагностика: выводим статус CryptoBot в логи
+    logger.info(f"DIAGNOSTIC: CRYPTOBOT_TOKEN = {'есть' if CRYPTOBOT_TOKEN else 'НЕТ'}, crypto = {crypto is not None}")
+
     if data == "main_menu":
         status = get_user_status(user_id)
         status_text = ""
@@ -246,7 +250,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "subscribe_now":
         if not crypto:
-            await query.edit_message_text("⚠️ Система оплаты временно недоступна. Код: CRYPTOBOT_TOKEN не инициализирован.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Главное меню", callback_data="main_menu")]]))
+            await query.edit_message_text("⚠️ Система оплаты временно недоступна. Код: CryptoPayApi не инициализирован.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Главное меню", callback_data="main_menu")]]))
             return
         try:
             invoice = await crypto.create_invoice(
@@ -329,14 +333,18 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data in ["daily_report", "feedback_menu"]:
         await query.edit_message_text("⏳ Функция в разработке. Скоро появится!", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Главное меню", callback_data="main_menu")]]))
-        return
 
+# ---------- ЗАГЛУШКИ КОМАНД ----------
 async def coins_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"📊 Поддерживаемые монеты:\n{', '.join(SUPPORTED_COINS)}")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🤖 *Crypto Sentinel AI Bot*\n\nИспользуйте /start для открытия главного меню с кнопками.\nВсе функции доступны через кнопки.\n\n• Анализ монеты — доступен по подписке или пробному периоду\n• Пробный период — 3 дня бесплатно\n• Подписка — $10/месяц\n\nСтатус подписки отображается в главном меню.", parse_mode='Markdown')
+    await update.message.reply_text(
+        "🤖 *Crypto Sentinel AI Bot*\n\nИспользуйте /start для открытия главного меню с кнопками.\nВсе функции доступны через кнопки.\n\n• Анализ монеты — доступен по подписке или пробному периоду\n• Пробный период — 3 дня бесплатно\n• Подписка — $10/месяц\n\nСтатус подписки отображается в главном меню.",
+        parse_mode='Markdown'
+    )
 
+# ---------- ЗАПУСК ----------
 def main():
     init_db()
     TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
