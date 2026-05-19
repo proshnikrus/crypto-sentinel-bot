@@ -121,9 +121,8 @@ crypto = None
 if CRYPTOBOT_TOKEN:
     try:
         from async_crypto_pay_api import CryptoPayApi
-        # Используем параметр 'token', а не 'api_token'
-        crypto = CryptoPayApi(token=CRYPTOBOT_TOKEN, is_mainnet=False)
-        logger.info("CryptoPayApi инициализирован (тестовая сеть)")
+        crypto = CryptoPayApi(token=CRYPTOBOT_TOKEN)
+        logger.info("CryptoPayApi инициализирован")
     except ImportError:
         logger.error("async-crypto-pay-api не установлен")
         crypto = None
@@ -131,7 +130,7 @@ if CRYPTOBOT_TOKEN:
         logger.error(f"Ошибка инициализации CryptoPayApi: {e}")
         crypto = None
 else:
-    logger.error("CRYPTOBOT_TOKEN не найден")
+    logger.error("CRYPTOBOT_TOKEN не найден в переменных окружения")
 
 async def get_news(coin: str) -> str:
     try:
